@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>agentHUB — 跨工具会话档案</title>
+    <link rel="stylesheet" href="/web/vendor/katex.min.css" />
+    <link rel="stylesheet" href="/web/vendor/hljs-github.min.css" />
+    <link rel="stylesheet" href="/web/app.css" />
+  </head>
+  <body>
+    <header id="top">
+      <button class="iconbtn" id="toggleSidebar" aria-label="收起或展开会话列表" title="收起 / 展开会话列表">
+        ☰
+      </button>
+      <div id="brand"><b>agentHUB</b><span>跨工具会话档案</span></div>
+      <div id="topstats"></div>
+      <button
+        class="iconbtn"
+        id="rescan"
+        aria-label="重新扫描"
+        title="重新扫描各工具的本地会话（后台每 30 分钟也会自动扫描）"
+      >
+        ↻
+      </button>
+      <button class="iconbtn" id="btnSettings" aria-label="设置" title="设置：模型接口">⚙</button>
+    </header>
+
+    <main>
+      <aside aria-label="查找会话">
+        <div id="sidehead">
+          <div id="searchbox">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" />
+              <path d="M20 20l-4-4" />
+            </svg>
+            <input id="search" type="search" placeholder="搜索标题、目录或 ID" aria-label="搜索会话" />
+            <kbd>/</kbd>
+          </div>
+          <div id="viewtabs" class="tabs" role="tablist">
+            <div class="vt on" data-view="sessions">会话</div>
+            <div class="vt" data-view="cwd">按项目目录</div>
+          </div>
+          <div id="chips" role="group" aria-label="按工具筛选"></div>
+          <div id="dirFilter"><span class="p"></span><button title="取消目录过滤">×</button></div>
+        </div>
+        <div id="listhead">
+          <span id="lhL">记录</span>
+          <select id="groupMode" aria-label="任务组织方式" title="根任务视图下子任务折叠在父任务里">
+            <option value="roots">按任务树</option>
+            <option value="all">全部平铺</option>
+          </select>
+          <span id="lhR"></span>
+        </div>
+        <div id="list"><div id="loadwrap"></div></div>
+        <div id="lsel">
+          已选 <b id="lselN">0</b> 个会话 <span class="tools" id="lselTools"></span>
+          <button id="lselSum" class="pri">AI 总结</button>
+          <button id="lselExport" title="合并成一份交接文档（仅最终输出）">合并导出</button>
+          <button id="lselManage">查看已选</button><button id="lselClear">取消</button>
+        </div>
+      </aside>
+      <section id="detail">
+        <div id="empty">
+          <div class="welcome">
+            <h1>从一个会话开始</h1>
+            <p>
+              这里汇总了本机各个 AI 工具的对话。打开一个会话阅读或导出交接文档；勾选多个会话（可以跨工具），交给
+              AI 一起总结。
+            </p>
+            <div id="toolCards"></div>
+            <h2>最近的会话</h2>
+            <div id="recent"></div>
+            <p class="tips"><kbd>/</kbd> 搜索会话　<kbd>Esc</kbd> 取消选择　按住 <kbd>Shift</kbd> 连续勾选</p>
+          </div>
+        </div>
+        <button class="btn ghost" id="backList">← 返回会话列表</button>
+        <div id="headcard">
+          <div class="top">
+            <div id="hTitle"></div>
+            <button class="btn ghost sm" id="btnSummary" title="用大模型总结整个会话">
+              AI 总结
+            </button>
+            <button
+              class="btn sm"
+              id="btnExport"
+              title="对话视图导出仅最终输出；全程视图导出含工具调用的完整过程"
+            >
+              导出交接文档
+            </button>
+          </div>
+          <div id="meta"></div>
+        </div>
+        <div id="msgcard">
+          <div id="msgbar">
+            <div class="tabs" role="tablist" aria-label="消息视图">
+              <div class="s on" data-mode="chat" title="用户消息 + 每轮 AI 的最终回答">对话</div>
+              <div class="s" data-mode="user" title="只看用户的输入">只看用户</div>
+              <div class="s" data-mode="ai" title="只看每轮 AI 的最终回答">只看 AI</div>
+              <div class="s" data-mode="full" title="含思考、过程说明、工具调用与结果">全程</div>
+            </div>
+            <span id="msgcount"></span>
+            <div class="seg" id="orderseg" aria-label="排序">
+              <div class="s on" data-order="asc" title="最早的在前">正序</div>
+              <div class="s" data-order="desc" title="最新的在前">倒序</div>
+            </div>
+            <button class="iconbtn" id="findToggle" title="在会话中搜索（/）" aria-label="会话内搜索">⌕</button>
+            <button class="iconbtn" id="latest" title="跳至最新" aria-label="跳至最新">⤓</button>
+          </div>
+          <div id="findbar">
+            <input id="findText" type="search" placeholder="在当前会话中搜索" aria-label="会话内搜索" />
+            <span id="findCount"></span>
+            <button class="iconbtn" id="findPrev" aria-label="上一个匹配" title="上一个">↑</button>
+            <button class="iconbtn" id="findNext" aria-label="下一个匹配" title="下一个">↓</button>
+            <button class="iconbtn" id="findClose" aria-label="关闭搜索" title="关闭（Esc）">×</button>
+          </div>
+          <div id="msgs"></div>
+          <div id="selbar">
+            已选 <b id="selN">0</b> 条<span class="sp"></span>
+            <button id="selAll" title="选中当前已加载的全部条目">全选已加载</button>
+            <button id="selCopy" class="pri">复制</button>
+            <button id="selExport">导出节选</button>
+            <button id="selSum">AI 总结</button>
+            <button id="selClear">取消</button>
+            <span class="hint">Shift 连选 · Esc 取消</span>
+          </div>
+          <div id="jump">
+            <button id="jTop" title="回到顶部">↑</button>
+            <button id="jBot" title="直达底部">↓</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div id="modal">
+      <div id="box">
+        <div class="bh">
+          <div id="mdName"></div>
+          <span id="mdMode">仅最终输出</span>
+          <div class="seg" id="mdseg">
+            <div class="s on" data-md="raw">源码</div>
+            <div class="s" data-md="preview">预览</div>
+          </div>
+          <button class="btn" id="copyMd">复制全文</button>
+          <button class="btn ghost" id="dlMd">下载</button>
+          <button class="btn ghost" id="closeMd">关闭</button>
+        </div>
+        <pre id="mdpre"></pre>
+        <div id="mdview" class="md"></div>
+      </div>
+    </div>
+
+    <div class="dlg" id="setDlg">
+      <div class="pane">
+        <div class="ph">
+          <span class="t">设置 · 模型接口</span>
+          <button class="btn ghost sm" data-close>关闭</button>
+        </div>
+        <div class="pb">
+          <div class="fld">
+            接口地址（OpenAI 兼容）
+            <input
+              id="cfgUrl"
+              placeholder="例如 https://api.openai.com/v1 或 http://192.168.1.10:8787"
+            />
+            <span class="note"
+              >写到 /v1 或只写到主机端口都可以；使用 /v1/models 与 /v1/chat/completions。</span
+            >
+          </div>
+          <div class="fld">
+            API Key
+            <input
+              id="cfgKey"
+              type="password"
+              autocomplete="off"
+              placeholder="不需要鉴权的服务可留空"
+            />
+            <label class="note"><input type="checkbox" id="cfgClearKey" /> 清除已保存的 Key</label
+            ><span class="note" id="cfgKeyNote"
+              >只保存在本机 ~/.agenthub/config.json（权限 600），不会回传到页面。</span
+            >
+          </div>
+          <div class="fld">
+            上下文窗口（token）<input
+              id="cfgContext"
+              type="number"
+              min="1"
+              placeholder="留空按 32K 估算"
+            /><span class="note"
+              >填写模型支持的窗口；分段预算包含提示词和输出，按保守字符估算。</span
+            >
+          </div>
+          <div class="fld">
+            模型
+            <div class="hrow">
+              <input id="cfgModel" list="modelList" placeholder="输入搜索或点「获取模型列表」" />
+              <button class="btn ghost sm" id="cfgFetch">获取模型列表</button>
+            </div>
+            <span class="note" id="cfgModelNote"></span>
+          </div>
+          <div class="msgline" id="cfgMsg"></div>
+          <div class="hrow" style="justify-content: flex-end">
+            <button class="btn ghost sm" id="cfgTest">测试连接</button>
+            <button class="btn sm" id="cfgSave">保存</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <datalist id="modelList"></datalist>
+
+    <div class="dlg" id="sumDlg" role="complementary" aria-label="AI 总结">
+      <div class="pane" id="sumPane">
+        <div class="ph">
+          <span class="t" id="sumTitle">AI 总结</span>
+          <button class="btn ghost sm" id="sumCopy">复制</button>
+          <button class="btn ghost sm" id="sumDl">下载</button>
+          <button class="btn ghost sm" data-close>收起</button>
+        </div>
+        <div id="sumCtl">
+          <div class="fld">
+            模板
+            <select id="sumTpl">
+              <option value="handover">交接摘要（目标 / 已完成 / 结论 / 待办 / 文件）</option>
+              <option value="brief">要点提炼</option>
+              <option value="decisions">关键决策与待办</option>
+              <option value="custom">自定义要求</option>
+            </select>
+          </div>
+          <div class="fld">
+            模型 <input id="sumModel" list="modelList" placeholder="默认使用设置中的模型" />
+          </div>
+          <label class="note"><input type="checkbox" id="sumChildren" /> 包含子任务</label
+          ><button class="btn ghost sm" id="sumPreview">检查范围</button
+          ><button class="btn sm" id="sumRun">开始总结</button>
+          <div class="fld" id="sumPrompt">
+            总结要求
+            <textarea
+              id="sumPromptText"
+              placeholder="例如：只列出所有被修改的文件和修改原因"
+            ></textarea>
+          </div>
+        </div>
+        <div id="sumScope" class="note" aria-live="polite"></div>
+        <div id="sumStatus"><span class="spin"></span><span id="sumStatusText">未开始</span></div>
+        <div id="sumOut" class="md"></div>
+        <div id="sumFoot">
+          <button class="btn ghost sm" id="sumNew">使用当前选择</button
+          ><span>结果保留到刷新页面；重新生成将替换结果。</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="dlg" id="selectionDlg">
+      <div class="pane">
+        <div class="ph">
+          <span class="t">已选会话</span><button class="btn ghost sm" data-close>关闭</button>
+        </div>
+        <div class="pb" id="selectionList"></div>
+      </div>
+    </div>
+    <div class="dlg" id="childDlg">
+      <div class="pane">
+        <div class="ph">
+          <span class="t">子任务</span><button class="btn ghost sm" data-close>关闭</button>
+        </div>
+        <div class="pb" id="childList"></div>
+      </div>
+    </div>
+    <div class="dlg" id="probDlg">
+      <div class="pane">
+        <div class="ph">
+          <span class="t">扫描问题（索引保持上一次成功的结果）</span
+          ><button class="btn ghost sm" data-close>关闭</button>
+        </div>
+        <div class="pb" id="probList"></div>
+      </div>
+    </div>
+    <button class="btn" id="reopenSummary" hidden>查看总结</button>
+    <div id="toast" role="status"></div>
+    <div id="loading"><span class="spin"></span><span id="loadingText">读取中…</span></div>
+
+    <script src="/web/vendor/marked.umd.js"></script>
+    <script src="/web/vendor/purify.min.js"></script>
+    <script src="/web/vendor/highlight.min.js"></script>
+    <script src="/web/vendor/katex.min.js"></script>
+    <script src="/web/render.js"></script>
+    <script src="/web/app.js"></script>
+  </body>
+</html>
