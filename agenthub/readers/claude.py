@@ -10,6 +10,7 @@
 """
 
 import json
+import re
 import os
 from typing import List
 
@@ -20,7 +21,18 @@ ROOT = os.path.join(tool_home(".claude", "AGENTHUB_CLAUDE_HOME", "CLAUDE_CONFIG_
 
 # 这些块/行在导出时跳过
 SKIP_PREFIXES = ("<system-reminder", "<command-name>", "<local-command",
-                 "<task-notification")
+                 "<task-notification", "<bash-input>", "<bash-stdout>", "<bash-stderr>")
+BASH_RE = re.compile(r"<bash-(input|stdout|stderr)>(.*?)</bash-\1>", re.S)
+
+
+def _bash_text(o: dict) -> str:
+    """用户在 Claude Code 里用「!」直接执行的终端命令（不是对 AI 说的话）→ 可读文本；否则空串。"""
+    c = (o.get("message") or {}).get("content")
+    if not isinstance(c, str) or not c.startswith(("<bash-input>", "<bash-stdout>", "<bash-stderr>")):
+        return ""
+    parts = {k: v.strip() for k, v in BASH_RE.findall(c)}
+    out = "\n".join(x for x in (parts.get("stdout"), parts.get("stderr")) if x)
+    return "\n".join(x for x in (parts.get("input") and "$ " + parts["input"], out) if x)
 
 
 def _user_text(o: dict) -> str:
@@ -133,6 +145,9 @@ class ClaudeReader:
                 txt = _user_text(o)
                 if txt:
                     msgs.append(Message(role="user", text=txt, timestamp=ts, **identity))
+                elif _bash_text(o):
+                    msgs.append(Message(role="system", kind="event", text=_bash_text(o), timestamp=ts,
+                                        **dict(identity, source="claude:bash")))
                 elif isinstance(c, list):
                     for b in c:
                         if isinstance(b, dict) and b.get("type") == "tool_result":

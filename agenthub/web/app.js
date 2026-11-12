@@ -107,6 +107,7 @@ const EVENT_LABELS = [
   ["tool-workflow", "工作流"],
   ["subagent-activity", "子代理"],
   ["context-compaction", "上下文压缩"],
+  ["claude:bash", "终端命令"],
 ];
 const eventLabel = (m) => (EVENT_LABELS.find(([k]) => (m.source || "").includes(k)) || [0, "协作"])[1];
 async function openById(tool, id) {
