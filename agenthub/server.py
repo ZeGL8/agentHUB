@@ -21,6 +21,7 @@ import functools
 import json
 import mimetypes
 import os
+import sys
 import threading
 import time
 import urllib.parse
@@ -34,7 +35,20 @@ from .exporter import export_session, message_md, render_markdown, _safe_name
 from .model import is_chat, VIEWS
 from .readers import read_record
 
-WEB_DIR = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "web"))
+def _web_dir() -> str:
+    """静态资源目录。PyInstaller 单文件模式下资源被解到 sys._MEIPASS。"""
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        cand = os.path.join(base, "agenthub", "web")
+        if os.path.isdir(cand):
+            return os.path.realpath(cand)
+        cand = os.path.join(base, "web")
+        if os.path.isdir(cand):
+            return os.path.realpath(cand)
+    return os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "web"))
+
+
+WEB_DIR = _web_dir()
 HOST = "127.0.0.1"
 DEFAULT_PORT = int(os.environ.get("AGENTHUB_PORT", "8322"))
 MAX_MSG_PAGE = 200     # 消息接口分页大小
@@ -96,13 +110,14 @@ def current_records():
     return live_records(_records)
 
 
-def _source_sig(path: str, tool: str = "") -> tuple:
+def _source_sig(path: str, tool: str = "", session_id: str = "") -> tuple:
     """会话源文件（及 SQLite 的 -wal）的修改时间，源数据一变缓存即失效。"""
     signature = (path,) + tuple((os.stat(p).st_mtime_ns, os.stat(p).st_size) if os.path.exists(p) else (0, 0)
                                for p in (path, path + "-wal"))
     if tool == "workbuddy":
-        from .readers.workbuddy import trace_signature
-        signature += trace_signature()
+        # 正文优先来自 projects/<ws>/<sid>.jsonl，只在缺 transcript 时才回退 traces。
+        from .readers.workbuddy import session_signature
+        signature += session_signature(session_id)
     return signature
 
 
@@ -136,7 +151,7 @@ def session_payload(tool: str, sid: str, offset: int, order: str = "asc",
     if offset < 0:
         raise ValueError("offset 不能为负数")
     rec = find_record(tool, sid)
-    msgs = list(enumerate(_cached_messages(rec.tool, rec.session_id, _source_sig(rec.file_path, rec.tool))))
+    msgs = list(enumerate(_cached_messages(rec.tool, rec.session_id, _source_sig(rec.file_path, rec.tool, rec.session_id))))
     if view in VIEWS:
         msgs = [(i, m) for i, m in msgs if VIEWS[view](m)]
     if order == "desc":
@@ -183,7 +198,7 @@ def selected_messages(msgs, selection, default_chat=True):
 
 def excerpt_payload(tool: str, sid: str, indices=None, message_ids=None) -> dict:
     rec = find_record(tool, sid)
-    msgs = _cached_messages(rec.tool, rec.session_id, _source_sig(rec.file_path, rec.tool))
+    msgs = _cached_messages(rec.tool, rec.session_id, _source_sig(rec.file_path, rec.tool, rec.session_id))
     selection = {"message_ids": message_ids} if message_ids is not None else {"indices": indices}
     chosen = selected_messages(msgs, selection)
     return {"filename": f"{rec.tool}__{_safe_name(rec.session_id, 12)}__"
@@ -223,7 +238,7 @@ def _items(body: dict) -> list:
 def summary_blocks(body: dict) -> list:
     blocks = []
     for rec, selection in _items(body):
-        msgs = _cached_messages(rec.tool, rec.session_id, _source_sig(rec.file_path, rec.tool))
+        msgs = _cached_messages(rec.tool, rec.session_id, _source_sig(rec.file_path, rec.tool, rec.session_id))
         for m in selected_messages(msgs, selection):
             block = message_md(m)
             if not block:
@@ -298,7 +313,7 @@ def export_multi(body: dict) -> dict:
     """多个会话（可跨工具）合并成一份交接文档。"""
     mode = "full" if body.get("mode") == "full" else "final"
     recs = [rec for rec, _ in _items(body)]
-    docs = [render_markdown(r, _cached_messages(r.tool, r.session_id, _source_sig(r.file_path, r.tool)), mode)
+    docs = [render_markdown(r, _cached_messages(r.tool, r.session_id, _source_sig(r.file_path, r.tool, r.session_id)), mode)
             for r in recs]
     toc = "\n".join(f"{k}. [{r.tool}] {r.title}（`{r.cwd or '未知目录'}`）" for k, r in enumerate(recs, 1))
     md = (f"# 多会话交接文档（{len(recs)} 个会话）\n\n> 由 agentHUB 合并导出，"
@@ -320,7 +335,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            pass  # 客户端提前断开（切换会话/关闭窗口），不是服务端问题
 
     def _json(self, obj, code=200):
         self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"),
@@ -460,8 +478,8 @@ class Handler(BaseHTTPRequestHandler):
                 })
             else:
                 self._err(404, "not found")
-        except BrokenPipeError:
-            pass
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            pass  # 客户端断开，响应已无处可送
         except ValueError as e:  # offset/limit 等参数非法
             self._err(400, f"参数错误: {e}")
         except Exception as e:  # noqa: BLE001
@@ -582,8 +600,12 @@ class Handler(BaseHTTPRequestHandler):
         return {"groups": rows}
 
 
-def main(port: int = DEFAULT_PORT):
-    global _last_scan_at
+def create_server(port: int = DEFAULT_PORT):
+    """建好 HTTP 服务并完成首轮扫描，返回 httpd（不进入 serve_forever）。
+
+    桌面版外壳和 main() 共用这段逻辑，保证扫描、白名单、自动重扫行为一致。
+    调用方负责起线程跑 httpd.serve_forever()，并在退出时 server_close()。
+    """
     if not 1 <= port <= 65535:
         raise ValueError("端口必须在 1–65535 之间")
     if RESCAN_MINUTES < 0:
@@ -611,6 +633,11 @@ def main(port: int = DEFAULT_PORT):
         t = threading.Thread(target=_auto_rescan_loop, daemon=True)
         t.start()
     print(f"自动重扫：每 {RESCAN_MINUTES} 分钟（AGENTHUB_RESCAN_MINUTES 可调）")
+    return httpd
+
+
+def main(port: int = DEFAULT_PORT):
+    httpd = create_server(port)
     print(f"agentHUB Web UI → http://{HOST}:{port}  (Ctrl+C 停止)")
     try:
         httpd.serve_forever()

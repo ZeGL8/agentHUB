@@ -3,32 +3,40 @@
 
 存储位置：
   ~/.workbuddy/workbuddy.db → sessions 表（元数据）
-  ~/.workbuddy/traces/<pid>/trace_*.json → 每轮 LLM 调用的完整输入输出
-    （generation span 的 toolInput 含截至该轮的完整消息历史（上限 100K 截断），
-     toolOutput 为该步响应；用户正文在 user 项 content 的 <user_query> 标签内）
+  ~/.workbuddy/projects/<cwd转义>/<sessionId>.jsonl → 会话 transcript（正文首选）
+    逐行事件流：session-meta / message(user|assistant) / reasoning /
+    function_call / function_call_result / file-history-snapshot / ai-title
+  ~/.workbuddy/traces/<pid>/trace_*.json(l) → 每轮 LLM 调用的原始 trace（回退）
   ~/.workbuddy/changes-detail/<convId>/cd_*.json → 文件变更检查点
 
-新版 trace 按原生 sessionId 归属；旧版按工作目录与创建时间区间归属。
-
-只从原生 traces 重建对话；缺少 trace 时显式报错。
+正文优先从 projects transcript 读取：文件名即 sessionId，归属精确、内容完整。
+旧会话若没有 transcript，再回退到 traces（新版按 sessionId 归属，旧版按工作目录
+与创建时间区间归属）。两者都没有时显式报错，不伪造正文。
 """
 
-import glob
 import functools
+import glob
 import json
 import os
 import re
 from typing import List
 
 from ..model import SessionRecord, Message, ts_to_ms, clip
-from .base import open_ro, tool_home
+from .base import open_ro, tool_home, iter_jsonl
 
 WB = tool_home(".workbuddy", "AGENTHUB_WORKBUDDY_HOME")
 DB = os.path.join(WB, "workbuddy.db")
+PROJECTS_ROOT = os.path.join(WB, "projects")
 TRACES_ROOT = os.path.join(WB, "traces")
 
 USER_QUERY_RE = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.S)
 WORKSPACE_RE = re.compile(r"Workspace Folder:\s*([^\n]+)")
+
+# transcript 里属于系统注入而非用户输入的前缀
+SKIP_PREFIXES = (
+    "<system-reminder", "<task-notification", "<command-name>",
+    "<local-command", "<connector-status", "<user_info",
+)
 
 
 def _content_full_text(content) -> str:
@@ -47,6 +55,116 @@ def _content_full_text(content) -> str:
         return "\n".join(parts)
     return str(content)
 
+
+# ---------------------------------------------------------------- transcript
+
+def transcript_path(session_id: str) -> str:
+    """projects/<cwd转义>/<sessionId>.jsonl；找不到返回空串。"""
+    hits = glob.glob(os.path.join(PROJECTS_ROOT, "*", f"{session_id}.jsonl"))
+    if not hits:
+        return ""
+    return max(hits, key=os.path.getmtime)
+
+
+def _user_text(o: dict) -> str:
+    """transcript 中 role=user 行的真人输入；系统注入返回空串。"""
+    text = _content_full_text(o.get("content")).strip()
+    if not text:
+        return ""
+    m = USER_QUERY_RE.search(text)
+    if m:
+        return m.group(1).strip()
+    if text.startswith(SKIP_PREFIXES):
+        return ""
+    return text
+
+
+def _result_text(output) -> str:
+    if isinstance(output, str):
+        return output
+    if isinstance(output, dict):
+        return _content_full_text(output.get("text") or output.get("content"))
+    return ""
+
+
+@functools.lru_cache(maxsize=4096)
+def _transcript_meta(path: str, signature) -> dict:
+    """轻量扫描 transcript：只统计与归属信息，不构造 Message，便于 scan 快速跑完。"""
+    n_user = n_asst = n_tool = 0
+    first_ts = last_ts = 0
+    cwd = title = first_user = model = ""
+    for o in iter_jsonl(path):
+        t = o.get("type")
+        if not cwd and o.get("cwd"):
+            cwd = str(o["cwd"])
+        ts = ts_to_ms(o.get("timestamp"))
+        if ts:
+            if not first_ts:
+                first_ts = ts
+            last_ts = ts
+        if t == "message":
+            role = o.get("role")
+            if role == "user":
+                txt = _user_text(o)
+                if txt:
+                    n_user += 1
+                    if not first_user:
+                        first_user = txt
+            elif role == "assistant":
+                if _content_full_text(o.get("content")).strip():
+                    n_asst += 1
+                m = (o.get("providerData") or {}).get("model")
+                if m:
+                    model = str(m)
+        elif t == "function_call":
+            n_tool += 1
+        elif t in ("ai-title", "custom-title"):
+            title = str(o.get("title") or o.get("customTitle") or title)
+    return {
+        "n_messages": n_user + n_asst, "n_tool_calls": n_tool,
+        "started_at": first_ts, "updated_at": last_ts, "cwd": cwd,
+        "title": title or first_user, "model": model,
+    }
+
+
+def _transcript_messages(path: str) -> List[Message]:
+    msgs: List[Message] = []
+    for o in iter_jsonl(path):
+        t = o.get("type")
+        ts = ts_to_ms(o.get("timestamp")) / 1000.0
+        mid = str(o.get("id") or "")
+        base = {"message_id": mid, "source": path}
+        if t == "message":
+            role = o.get("role")
+            text = _content_full_text(o.get("content")).strip()
+            if role == "user":
+                txt = _user_text(o)
+                if txt:
+                    msgs.append(Message(role="user", text=txt, timestamp=ts, **base))
+            elif role == "assistant" and text:
+                msgs.append(Message(role="assistant", text=text, timestamp=ts, **base))
+        elif t == "reasoning":
+            txt = _content_full_text(o.get("content")).strip()
+            if txt:
+                msgs.append(Message(role="assistant", kind="thinking", text=txt,
+                                    timestamp=ts, **base))
+        elif t == "function_call":
+            args = o.get("arguments")
+            msgs.append(Message(
+                role="assistant", kind="tool_call",
+                tool_name=str(o.get("name") or ""),
+                tool_args=args if isinstance(args, str) else json.dumps(args, ensure_ascii=False),
+                call_id=str(o.get("callId") or ""), timestamp=ts, **base))
+        elif t == "function_call_result":
+            msgs.append(Message(
+                role="assistant", kind="tool_result",
+                tool_name=str(o.get("name") or ""),
+                tool_output=_result_text(o.get("output")),
+                call_id=str(o.get("callId") or ""), timestamp=ts, **base))
+    return msgs
+
+
+# ---------------------------------------------------------------- traces（回退）
 
 def _iter_input_items(toolinput: str):
     """容错逐项解析（可能被截断的）toolInput JSON 数组。"""
@@ -69,15 +187,30 @@ def _iter_input_items(toolinput: str):
 
 
 def _load_spans(trace_path: str):
-    """读取 trace 文件，返回 (trace 开始时间 ms, 按时间排序的 spans)。"""
+    """读取 trace 文件，返回 (trace 元数据 dict, span 列表)。
+
+    兼容两种落盘格式：整份 JSON 对象（trace_*.json），以及逐行事件流（trace_*.jsonl，
+    其中 span_start/span_end 事件携带 span，只取已结束的 span_end 避免重复）。
+    """
+    trace = {}
+    spans = []
     try:
-        with open(trace_path, "r", encoding="utf-8", errors="replace") as f:
-            o = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
+        if trace_path.endswith(".jsonl"):
+            for ev in iter_jsonl(trace_path):
+                t = ev.get("type")
+                if t == "trace_start":
+                    trace = ev.get("trace") or {}
+                elif t == "span_end" and isinstance(ev.get("span"), dict):
+                    spans.append(ev["span"])
+        else:
+            with open(trace_path, "r", encoding="utf-8", errors="replace") as f:
+                o = json.load(f)
+            trace = o.get("trace") or {}
+            spans = [s for s in o.get("spans", []) or [] if isinstance(s, dict)]
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError(f"无法读取 WorkBuddy trace: {trace_path}") from exc
-    spans = [s for s in o.get("spans", []) or [] if isinstance(s, dict)]
     spans.sort(key=lambda s: s.get("startedAt") or "")
-    return ts_to_ms((o.get("trace") or {}).get("startedAt")), spans
+    return trace, spans
 
 
 def _trace_workspace(spans) -> str:
@@ -94,7 +227,7 @@ def _trace_workspace(spans) -> str:
 
 
 def _norm(path):
-    return os.path.normcase(path.replace("\\", "/").rstrip("/"))
+    return os.path.normcase(str(path).replace("\\", "/").rstrip("/"))
 
 
 def _file_sig(path):
@@ -105,17 +238,33 @@ def _file_sig(path):
 @functools.lru_cache(maxsize=4096)
 def _trace_meta(path, signature):
     # 仅缓存小型归属信息；按文件时间与大小失效，不把整份 spans 常驻内存。
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    trace = data.get("trace") or {}
+    trace, spans = _load_spans(path)
     sid = trace.get("sessionId") or ""
-    workspace = "" if sid else _trace_workspace(data.get("spans") or [])
+    workspace = "" if sid else _trace_workspace(spans)
     return sid, ts_to_ms(trace.get("startedAt")), _norm(workspace)
 
 
+def trace_files():
+    return sorted(glob.glob(os.path.join(TRACES_ROOT, "*", "trace_*.json")) +
+                  glob.glob(os.path.join(TRACES_ROOT, "*", "trace_*.jsonl")))
+
+
 def trace_signature():
-    return tuple((path, *_file_sig(path)) for path in sorted(
-        glob.glob(os.path.join(TRACES_ROOT, "*", "trace_*.json"))))
+    return tuple((path, *_file_sig(path)) for path in trace_files())
+
+
+def session_signature(session_id: str) -> tuple:
+    """单个会话的源文件签名，用于消息缓存失效。
+
+    有 transcript 时只看它（改它就够）；否则回退到 traces，此时任何 trace 变化都要失效。
+    """
+    tp = transcript_path(session_id)
+    if tp:
+        try:
+            return ((tp, *_file_sig(tp)),)
+        except OSError:
+            pass
+    return trace_signature()
 
 
 def _function_output(tooloutput: str) -> str:
@@ -180,27 +329,43 @@ class WorkBuddyReader:
                 extra={"model": str(model or ""),
                        "n_checkpoints": n_cp,
                        "tool_count_status": "unknown",
-                       "trace_rebuild": True,
                        "deleted": bool(deleted)},
             )
-            msgs = self._messages_from_traces(sid, (sid, cwd, title, custom, created, updated, model, None))
-            if msgs:
-                rec.n_messages = sum(m.kind == "text" for m in msgs)
-                rec.n_tool_calls = sum(m.kind == "tool_call" for m in msgs)
-                rec.extra["tool_count_status"] = "known"
-                rec.extra["content_updated_at"] = int(max(m.timestamp for m in msgs) * 1000)
+            tp = transcript_path(sid)
+            if tp:
+                meta = _transcript_meta(tp, _file_sig(tp))
+                rec.extra["source"] = "transcript"
+                rec.extra["file_path"] = tp
+                rec.size_bytes = os.path.getsize(tp)
+                if meta["cwd"]:
+                    rec.cwd = meta["cwd"]
+                if not custom and meta["title"]:
+                    rec.title = clip(meta["title"], 60) or rec.title
+                if meta["model"]:
+                    rec.extra["model"] = meta["model"]
+                if meta["n_messages"] or meta["n_tool_calls"]:
+                    rec.n_messages = meta["n_messages"]
+                    rec.n_tool_calls = meta["n_tool_calls"]
+                    rec.extra["tool_count_status"] = "known"
+                if meta["updated_at"]:
+                    rec.extra["content_updated_at"] = meta["updated_at"]
             records.append(rec)
         return records
 
     def read_messages(self, path: str) -> List[Message]:
-        """path 传 session_id；缺少 trace 不伪造会话正文。"""
+        """path 传 session_id；缺少任何正文来源时显式报错，不伪造会话。"""
         meta = self._session_meta(path)
         if not meta:
             return []
+        tp = transcript_path(path)
+        if tp:
+            msgs = _transcript_messages(tp)
+            if msgs:
+                return msgs
         msgs = self._messages_from_traces(path, meta)
         if msgs:
             return msgs
-        raise ValueError("本地没有可归属的 WorkBuddy trace，无法恢复该会话正文")
+        raise ValueError("本地没有可归属的 WorkBuddy 会话正文（transcript 与 trace 均缺失）")
 
     # ---------- 内部 ----------
 
@@ -226,7 +391,7 @@ class WorkBuddyReader:
         msgs: List[Message] = []
         seen_users = set()
         seen_spans = set()
-        for tf in sorted(glob.glob(os.path.join(TRACES_ROOT, "*", "trace_*.json"))):
+        for tf in trace_files():
             trace_sid, t_start, workspace = _trace_meta(tf, _file_sig(tf))
             if trace_sid:
                 if trace_sid != sid:

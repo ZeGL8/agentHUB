@@ -1,6 +1,13 @@
 .venv/
+.venv-build/
 __pycache__/
 .DS_Store
 index/
 exports/
 logs/
+build/
+build-desktop/
+build-onefile/
+dist/
+dist-desktop/
+dist-installer/

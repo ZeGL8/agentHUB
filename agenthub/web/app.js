@@ -75,6 +75,30 @@ async function copyText(text, okMsg) {
   }
 }
 
+/* 保存文本文件。
+   桌面版（pywebview）里 a.download 落不到用户想要的位置，改调原生「另存为」；
+   浏览器里仍旧用 Blob 下载，行为不变。 */
+async function saveText(filename, text, okMsg) {
+  const bridge = window.pywebview && window.pywebview.api;
+  if (bridge && bridge.save_text) {
+    try {
+      const res = await bridge.save_text(filename, text);
+      if (res && res.ok) toast("已保存到 " + res.path);
+      else if (res && res.cancelled) toast("已取消");
+      else toast("保存失败：" + ((res && res.error) || "未知错误"));
+    } catch (e) {
+      toast("保存失败：" + e.message);
+    }
+    return;
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/markdown" }));
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast(okMsg || "已下载");
+}
+
 /* ---------- Markdown 渲染：marked + KaTeX + highlight.js，DOMPurify 清洗 ----------
    对话内容不可信：原始 HTML 一律转义显示（也让 <user_query> 这类标签原样可见），
    图片不加载（避免外链请求），只显示为链接。 */
@@ -407,12 +431,9 @@ $("#copyMd").onclick = () => {
 $("#dlMd").onclick = () => {
   const d = window._lastExport;
   if (!d) return;
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([d.markdown], { type: "text/markdown" }));
-  a.download = d.filename;
-  a.click();
-  URL.revokeObjectURL(a.href);
-  toast(
+  saveText(
+    d.filename,
+    d.markdown,
     d.mode === "excerpt" || d.mode === "multi" ? "已下载" : "已下载，~/.agenthub/exports/ 同存一份",
   );
 };
@@ -570,14 +591,13 @@ $("#sumCopy").onclick = () => {
 $("#sumDl").onclick = () => {
   const t = stripThink(sum.text);
   if (!t) return;
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([t], { type: "text/markdown" }));
-  a.download = `AI总结__${$("#sumTitle")
-    .textContent.replace(/^AI 总结 · /, "")
-    .slice(0, 40)
-    .replace(/[\\/:*?"<>|\s]+/g, "_")}.md`;
-  a.click();
-  URL.revokeObjectURL(a.href);
+  saveText(
+    `AI总结__${$("#sumTitle")
+      .textContent.replace(/^AI 总结 · /, "")
+      .slice(0, 40)
+      .replace(/[\\/:*?"<>|\s]+/g, "_")}.md`,
+    t,
+  );
 };
 
 /* ---------- 搜索 / 重扫 ---------- */
