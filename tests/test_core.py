@@ -25,6 +25,11 @@ def test_claude_user_text():
     assert _user_text(u("技能注入", isMeta=True)) == ""
     assert _user_text(u("压缩摘要", isCompactSummary=True)) == ""
     assert _user_text(u("<task-notification>done")) == ""
+    # Claude Code「!」终端命令：不算用户发言，转成可读的终端事件；用户把它贴进消息里提问则仍是用户发言
+    from agenthub.readers.claude import _bash_text
+    bash = "<bash-input>ls</bash-input><bash-stdout>a.txt</bash-stdout><bash-stderr></bash-stderr>"
+    assert _user_text(u(bash)) == "" and _bash_text(u(bash)) == "$ ls\na.txt"
+    assert _user_text(u("【" + bash + "】这里识别错了")).startswith("【")
 
 
 def test_claude_scan_counts():
