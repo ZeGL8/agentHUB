@@ -2,7 +2,7 @@
 """agentHUB 桌面版入口。
 
 内置 HTTP 服务只监听 127.0.0.1（端口自动挑选），前面套一个原生窗口
-（Windows 走 WebView2）。用户看到的是一个独立应用窗口，没有地址栏。
+（Windows 走 WebView2，macOS 走 WKWebView）。用户看到的是一个独立应用窗口，没有地址栏。
 
 打包成无控制台程序后有两点必须处理：
   1. sys.stdout / sys.stderr 会是 None，任何 print 都会抛异常 —— 统一重定向到日志文件；
@@ -12,6 +12,7 @@
 import argparse
 import os
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -61,16 +62,26 @@ def _redirect_streams():
 
 
 def log(msg: str) -> None:
+    # stdout 已被重定向到日志文件，print 一次即可（原先再写一遍会让每行重复）
     try:
-        print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
     except Exception:
         pass
-    if _LOG_STREAM is not None:
-        try:
-            _LOG_STREAM.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
-            _LOG_STREAM.flush()
-        except Exception:
-            pass
+
+
+def _alert(msg: str) -> None:
+    """系统级错误对话框；窗口都没起来时也能让用户看到原因。"""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(None, msg, APP_NAME, 0x10)
+        elif sys.platform == "darwin":
+            subprocess.run(["osascript", "-e", "on run argv", "-e",
+                            "display alert (item 1 of argv) message (item 2 of argv) as critical",
+                            "-e", "end run", APP_NAME, msg], timeout=120, check=False)
+    except Exception:
+        pass
 
 
 def _install_crash_logger():
@@ -79,17 +90,7 @@ def _install_crash_logger():
     def hook(exc_type, exc_value, exc_tb):
         text = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
         log("UNCAUGHT\n" + text)
-        try:
-            import ctypes
-
-            ctypes.windll.user32.MessageBoxW(
-                None,
-                f"agentHUB 启动失败：\n\n{exc_value}\n\n详细信息见：\n{_log_path()}",
-                "agentHUB",
-                0x10,
-            )
-        except Exception:
-            pass
+        _alert(f"agentHUB 启动失败：\n\n{exc_value}\n\n详细信息见：\n{_log_path()}")
 
     sys.excepthook = hook
 
@@ -174,7 +175,7 @@ class Api:
             safe += ".md"
         try:
             result = self._window.create_file_dialog(
-                webview.SAVE_DIALOG,
+                webview.FileDialog.SAVE,
                 directory=self._last_dir,
                 save_filename=safe,
                 file_types=("Markdown (*.md)", "所有文件 (*.*)"),
@@ -200,7 +201,10 @@ class Api:
 
         try:
             os.makedirs(DATA_DIR, exist_ok=True)
-            os.startfile(DATA_DIR)  # noqa: S606 - Windows 专用
+            if sys.platform == "win32":
+                os.startfile(DATA_DIR)  # noqa: S606
+            else:
+                subprocess.run(["open" if sys.platform == "darwin" else "xdg-open", DATA_DIR], check=True)
             return {"ok": True, "path": DATA_DIR}
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)}
@@ -219,7 +223,7 @@ SPLASH_HTML = """<!DOCTYPE html>
   html,body{height:100%;margin:0}
   body{display:flex;align-items:center;justify-content:center;
        background:#f7f8fa;color:#2b2f36;
-       font:14px/1.6 "Microsoft YaHei","Segoe UI",system-ui,sans-serif}
+       font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei","Segoe UI",system-ui,sans-serif}
   .box{text-align:center}
   .dot{width:10px;height:10px;border-radius:50%;background:#6cb0ff;display:inline-block;
        margin:0 3px;animation:b 1.2s infinite ease-in-out}
@@ -356,7 +360,7 @@ def _show_error(window, msg: str) -> None:
 
         window.load_html(
             "<html><head><meta charset='utf-8'></head>"
-            "<body style='font:14px/1.7 \"Microsoft YaHei\",sans-serif;padding:40px;color:#b4232c'>"
+            "<body style='font:14px/1.7 -apple-system,\"PingFang SC\",\"Microsoft YaHei\",sans-serif;padding:40px;color:#b4232c'>"
             f"<h3>启动失败</h3><p>{_html.escape(msg)}</p></body></html>"
         )
     except Exception:

@@ -72,6 +72,24 @@ uv run python tests/test_core.py      # 原有回归检查
 
 也可以全局安装成命令：`uv tool install .`（或 `pip install .`），之后直接运行 `agenthub serve`。
 
+## 桌面版
+
+桌面版是同一套页面套在原生窗口里（macOS 用 WKWebView，Windows 用 WebView2），没有地址栏；内置服务只监听 `127.0.0.1` 的随机端口。
+
+```bash
+uv sync --extra desktop
+uv run python packaging/desktop.py        # 不打包，直接以桌面窗口运行
+```
+
+打包（PyInstaller 只能在目标系统上构建，不能交叉编译）：
+
+| 平台 | 命令 | 产物 |
+|---|---|---|
+| macOS | `packaging/build_macos.sh` | `dist-macos/agentHUB.app` 与 `agentHUB-<版本>-<架构>.dmg`；打开 dmg 拖进「应用程序」即可 |
+| Windows | `pyinstaller --noconfirm --clean packaging/agenthub_desktop.spec`，再用 `packaging/installer.nsi` 出安装包 | `dist-desktop/agentHUB/agentHUB.exe` |
+
+macOS 产物的架构与构建用的 Python 一致（Apple Silicon 上为 arm64）。脚本默认 ad-hoc 签名，本机可直接运行；分发给别人需设置 `SIGN_ID` 用 Developer ID 签名并公证，否则对方首次打开要右键 →「打开」。桌面版运行日志在 `~/.agenthub/desktop.log`。
+
 ## 可视化页面（Web UI）
 
 功能：
@@ -121,6 +139,7 @@ agentHUB/
 │   ├── llm.py           # AI 总结：OpenAI 兼容接口调用、分段提要、流式输出
 │   ├── web/             # 前端单页 + vendor 渲染库
 │   └── cli.py           # 命令行入口
+├── packaging/          # 桌面版：desktop.py 入口；macOS / Windows 打包配置与图标
 └── tests/              # 读取、删除过滤、AI 流式与服务回归检查
 
 ~/.agenthub/             # 运行数据（AGENTHUB_HOME 可改）

@@ -123,7 +123,7 @@ def _transcript_meta(path: str, signature) -> dict:
     return {
         "n_messages": n_user + n_asst, "n_tool_calls": n_tool,
         "started_at": first_ts, "updated_at": last_ts, "cwd": cwd,
-        "title": title or first_user, "model": model,
+        "title": title, "first_user": first_user, "model": model,
     }
 
 
@@ -339,8 +339,9 @@ class WorkBuddyReader:
                 rec.size_bytes = os.path.getsize(tp)
                 if meta["cwd"]:
                     rec.cwd = meta["cwd"]
-                if not custom and meta["title"]:
-                    rec.title = clip(meta["title"], 60) or rec.title
+                # 优先级：用户自定义标题 > transcript 的 AI 标题 > 数据库标题 > 首条用户消息
+                if not custom and (meta["title"] or not title):
+                    rec.title = clip(meta["title"] or meta["first_user"], 60) or rec.title
                 if meta["model"]:
                     rec.extra["model"] = meta["model"]
                 if meta["n_messages"] or meta["n_tool_calls"]:

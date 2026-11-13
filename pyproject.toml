@@ -7,6 +7,10 @@ dependencies = [
     "zstandard>=0.25.0",
 ]
 
+[project.optional-dependencies]
+# 桌面版窗口（macOS 自动带上 pyobjc / WKWebView 绑定，Windows 走 WebView2）
+desktop = ["pywebview>=5.4"]
+
 [project.scripts]
 agenthub = "agenthub.cli:main"
 

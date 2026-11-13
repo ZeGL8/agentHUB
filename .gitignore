@@ -11,3 +11,6 @@ build-onefile/
 dist/
 dist-desktop/
 dist-installer/
+.venv-build-macos/
+build-macos/
+dist-macos/
