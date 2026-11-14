@@ -88,7 +88,31 @@ uv run python packaging/desktop.py        # 不打包，直接以桌面窗口运
 | macOS | `packaging/build_macos.sh` | `dist-macos/agentHUB.app` 与 `agentHUB-<版本>-<架构>.dmg`；打开 dmg 拖进「应用程序」即可 |
 | Windows | `pyinstaller --noconfirm --clean packaging/agenthub_desktop.spec`，再用 `packaging/installer.nsi` 出安装包 | `dist-desktop/agentHUB/agentHUB.exe` |
 
-macOS 产物的架构与构建用的 Python 一致（Apple Silicon 上为 arm64）。脚本默认 ad-hoc 签名，本机可直接运行；分发给别人需设置 `SIGN_ID` 用 Developer ID 签名并公证，否则对方首次打开要右键 →「打开」。桌面版运行日志在 `~/.agenthub/desktop.log`。
+macOS 产物的架构与构建用的 Python 一致（Apple Silicon 上为 arm64）。桌面版运行日志在 `~/.agenthub/desktop.log`。
+
+### macOS 提示「Apple 无法验证 agentHUB 是否包含恶意软件」
+
+脚本默认只做 ad-hoc 签名（免费），没有经过 Apple 公证。dmg 一旦经浏览器、微信、AirDrop 等传到 Mac 上就会被打上隔离标记，Gatekeeper 会拦下未公证的应用。应用本身没有问题，放行方法任选其一（dmg 里也附带了「打不开请看我.txt」）：
+
+1. 把 agentHUB 拖进「应用程序」后，在终端执行一次：
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/agentHUB.app
+   ```
+
+2. 不用终端：双击后点「完成」→ 打开「系统设置 → 隐私与安全性」，在最下方点「仍要打开」→ 输入密码确认。（macOS 15 起右键 →「打开」已不再能绕过。）
+
+**彻底消除提示**需要 Apple Developer 账号（年费）做 Developer ID 签名 + 公证，脚本已内置完整流程（由内向外签名、Hardened Runtime + `packaging/entitlements.plist`、提交公证、钉票据）：
+
+```bash
+xcrun notarytool store-credentials agenthub-notary --apple-id 你的AppleID --team-id TEAMID --password App专用密码
+```
+
+```bash
+SIGN_ID="Developer ID Application: 名字 (TEAMID)" NOTARY_PROFILE=agenthub-notary packaging/build_macos.sh
+```
+
+第一条只需执行一次（App 专用密码在 appleid.apple.com 生成）。CI 中也可以改用环境变量 `APPLE_ID` / `APPLE_TEAM_ID` / `APPLE_APP_PASSWORD`。公证通过后脚本会用 `spctl` 自检，产出的 dmg 在任何 Mac 上双击都不会再弹警告。
 
 ## 可视化页面（Web UI）
 
